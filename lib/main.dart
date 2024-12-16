@@ -1,7 +1,9 @@
 import 'dart:convert';
+import 'dart:io';
 import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
+import 'package:wifi_scan/wifi_scan.dart';
 
 void main() {
   runApp(const GatewayWifiApp());
@@ -33,6 +35,8 @@ class ScanGatewayScreen extends StatefulWidget {
 
 class _ScanGatewayScreenState extends State<ScanGatewayScreen> {
   List<ScanResult> _scanResults = [];
+  bool _isScanning = false;
+  bool _isScanComplete = false;
 
   @override
   void initState() {
@@ -41,13 +45,32 @@ class _ScanGatewayScreenState extends State<ScanGatewayScreen> {
   }
 
   void scanForGateways() {
+    setState(() {
+      _isScanning = true;
+      _isScanComplete = false;
+      _scanResults = [];
+    });
+
     FlutterBluePlus.startScan(timeout: const Duration(seconds: 5));
+
     FlutterBluePlus.scanResults.listen((results) {
       setState(() {
         _scanResults = results
             .where((result) =>
                 result.device.platformName.toLowerCase().contains('ameba'))
             .toList();
+
+        if (_scanResults.isNotEmpty) {
+          _isScanning = false;
+        }
+      });
+    });
+
+    Future.delayed(const Duration(seconds: 5), () {
+      FlutterBluePlus.stopScan();
+      setState(() {
+        _isScanning = false;
+        _isScanComplete = true;
       });
     });
   }
@@ -55,8 +78,26 @@ class _ScanGatewayScreenState extends State<ScanGatewayScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('게이트웨이 스캔 결과')),
-      body: ListView.builder(
+      appBar: AppBar(
+        title: const Text('게이트웨이 스캔'),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.refresh),
+            onPressed: scanForGateways,
+          ),
+        ],
+      ),
+      body: _buildBody(),
+    );
+  }
+
+  Widget _buildBody() {
+    if (_isScanning) {
+      return const Center(child: Text('기기를 탐색 중입니다...'));
+    } else if (_isScanComplete && _scanResults.isEmpty) {
+      return const Center(child: Text('기기 탐색이 완료됐습니다.'));
+    } else {
+      return ListView.builder(
         itemCount: _scanResults.length,
         itemBuilder: (context, index) {
           ScanResult result = _scanResults[index];
@@ -79,7 +120,7 @@ class _ScanGatewayScreenState extends State<ScanGatewayScreen> {
                   await result.device.connect();
                   Navigator.of(context, rootNavigator: true).pop();
                   ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(content: Text('Connected to Gateway!')),
+                    const SnackBar(content: Text('게이트웨이 연결에 성공하였습니다!')),
                   );
                   Navigator.push(
                     context,
@@ -99,8 +140,8 @@ class _ScanGatewayScreenState extends State<ScanGatewayScreen> {
             ),
           );
         },
-      ),
-    );
+      );
+    }
   }
 }
 
@@ -115,18 +156,97 @@ class ConfigWifiScreen extends StatefulWidget {
 }
 
 class _ConfigWifiScreenState extends State<ConfigWifiScreen> {
-  final TextEditingController ssidController = TextEditingController();
-  final TextEditingController passwordController = TextEditingController();
-  bool is24Ghz = true;
-  bool isSecured = true;
+  List<WiFiAccessPoint> _wifiNetworks = [];
+  WiFiAccessPoint? _selectedWifi;
+  final TextEditingController _passwordController = TextEditingController();
 
   @override
   void initState() {
     super.initState();
-    widget.selectedDevice.connectionState
-        .listen((BluetoothConnectionState state) {
-      print('Connection State: $state');
-    });
+    if (Platform.isAndroid) {
+      _scanForWifiNetworks();
+    }
+  }
+
+  void _scanForWifiNetworks() async {
+    final canScan = await WiFiScan.instance.canStartScan();
+    if (canScan == CanStartScan.yes) {
+      await WiFiScan.instance.startScan();
+      final results = await WiFiScan.instance.getScannedResults();
+      setState(() {
+        _wifiNetworks = results;
+      });
+    } else {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('WiFi 스캔을 시작할 수 없습니다.')),
+      );
+    }
+  }
+
+  void _showLoadingDialog() {
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (BuildContext context) {
+        return const Center(
+          child: CircularProgressIndicator(),
+        );
+      },
+    );
+  }
+
+  void _sendWifiInfo() async {
+    if (_selectedWifi == null || _passwordController.text.isEmpty) return;
+
+    // Dialog 표시
+    _showLoadingDialog();
+
+    Uint8List packet = prepareWifiInfoPacket(
+      ssid: _selectedWifi!.ssid,
+      bssid: _selectedWifi!.bssid,
+      is5Ghz: _selectedWifi!.frequency >= 5000,
+      password: _passwordController.text,
+    );
+
+    // WiFi 정보 콘솔에 출력
+    print('SSID: ${_selectedWifi!.ssid}');
+    print('BSSID: ${_selectedWifi!.bssid}');
+    print('is5Ghz: ${_selectedWifi!.frequency >= 5000}');
+    print('Password: ${_passwordController.text}');
+
+    try {
+      List<BluetoothService> services =
+          await widget.selectedDevice.discoverServices();
+      BluetoothCharacteristic? targetCharacteristic;
+
+      for (var service in services) {
+        for (var characteristic in service.characteristics) {
+          if (characteristic.properties.write) {
+            targetCharacteristic = characteristic;
+            break;
+          }
+        }
+        if (targetCharacteristic != null) break;
+      }
+
+      if (targetCharacteristic != null) {
+        await targetCharacteristic.write(packet, withoutResponse: false);
+        Navigator.of(context, rootNavigator: true).pop(); // Dialog 닫기
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('WiFi 정보 전송 성공!')),
+        );
+      } else {
+        Navigator.of(context, rootNavigator: true).pop(); // Dialog 닫기
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Writable characteristic not found')),
+        );
+      }
+    } catch (e) {
+      Navigator.of(context, rootNavigator: true).pop(); // Dialog 닫기
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Error during BLE write operation: $e')),
+      );
+    }
   }
 
   @override
@@ -139,99 +259,101 @@ class _ConfigWifiScreenState extends State<ConfigWifiScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('WiFi 정보 입력 페이지'),
+        title: const Text('WiFi 스캔'),
       ),
-      body: SingleChildScrollView(
-        child: Padding(
-          padding: const EdgeInsets.all(16.0),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              // WiFi 정보 보내기, BLE 연결 해제
-              Row(
-                children: [
-                  Expanded(
-                    child: ElevatedButton(
-                      onPressed: () async {
-                        Uint8List packet = prepareWifiInfoPacket();
-
-                        try {
-                          List<BluetoothService> services =
-                              await widget.selectedDevice.discoverServices();
-                          BluetoothCharacteristic? targetCharacteristic;
-
-                          for (var service in services) {
-                            print('Discovered Service UUID: ${service.uuid}');
-                            for (var characteristic
-                                in service.characteristics) {
-                              print(
-                                  'Discovered Characteristic UUID: ${characteristic.uuid}');
-                              if (characteristic.properties.write) {
-                                targetCharacteristic = characteristic;
-                                break;
-                              }
-                            }
-                            if (targetCharacteristic != null) {
-                              print(
-                                  'Target Characteristic UUID Found: ${targetCharacteristic.uuid}');
-                              break;
-                            }
-                          }
-
-                          if (targetCharacteristic != null) {
-                            print('Generated Packet: ${packet.toString()}');
-                            print(
-                                'Generated HEX Packet: ${toHexString(packet)}');
-
-                            await targetCharacteristic.write(packet,
-                                withoutResponse: false);
-                            print(
-                                'Packet successfully written to characteristic: ${targetCharacteristic.uuid}');
-                          } else {
-                            print('Writable characteristic not found');
-                          }
-                        } catch (e) {
-                          print('Error during BLE write operation: $e');
-                        }
-                      },
-                      child: const Text('WiFi 정보 보내기'),
-                    ),
+      body: Padding(
+        padding: const EdgeInsets.all(16.0),
+        child: Column(
+          children: [
+            if (Platform.isAndroid) ...[
+              const Text('WiFi 네트워크 목록'),
+              Expanded(
+                child: ListView.separated(
+                  itemCount: _wifiNetworks.length,
+                  separatorBuilder: (context, index) => const Divider(
+                    thickness: 0.5, // 구분선 두께
+                    height: 16, // 구분선 높이
+                    color: Colors.grey, // 구분선 색상
                   ),
-                  const SizedBox(width: 10),
-                  Expanded(
-                    child: ElevatedButton(
-                      onPressed: () async {
-                        try {
-                          await widget.selectedDevice.disconnect();
-                          Navigator.pop(context);
-                        } catch (e) {
-                          ScaffoldMessenger.of(context).showSnackBar(
-                            SnackBar(content: Text('Disconnection Error: $e')),
-                          );
-                        }
-                      },
-                      style: ElevatedButton.styleFrom(
-                        foregroundColor: Colors.red,
+                  itemBuilder: (context, index) {
+                    final wifi = _wifiNetworks[index];
+                    String frequencyLabel =
+                        wifi.frequency >= 5000 ? '5GHz' : '2.4GHz';
+
+                    return ListTile(
+                      title: Text(wifi.ssid),
+                      subtitle: Text(
+                        '${wifi.bssid}\n$frequencyLabel\n${hasPassword(wifi.capabilities) ? '보안 있음' : '보안 없음'}',
+                        maxLines: 3,
                       ),
-                      child: const Text('BLE 연결 해제'),
-                    ),
-                  ),
-                ],
+                      trailing: ElevatedButton(
+                        onPressed: () {
+                          setState(() {
+                            _selectedWifi = wifi;
+                          });
+
+                          // Dialog 표시
+                          showDialog(
+                            context: context,
+                            barrierDismissible: false,
+                            builder: (BuildContext context) {
+                              return AlertDialog(
+                                title: Text('${wifi.ssid} 연결'),
+                                content: Column(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    TextField(
+                                      controller: _passwordController,
+                                      decoration: const InputDecoration(
+                                        labelText: '비밀번호 입력',
+                                      ),
+                                      obscureText: true,
+                                    ),
+                                  ],
+                                ),
+                                actions: [
+                                  TextButton(
+                                    onPressed: () =>
+                                        Navigator.of(context).pop(),
+                                    child: const Text('취소'),
+                                  ),
+                                  ElevatedButton(
+                                    onPressed: () {
+                                      Navigator.of(context).pop();
+                                      _sendWifiInfo();
+                                    },
+                                    child: const Text('WiFi 정보 보내기'),
+                                  ),
+                                ],
+                              );
+                            },
+                          );
+                        },
+                        child: const Text('연결하기'),
+                      ),
+                    );
+                  },
+                ),
               ),
             ],
-          ),
+          ],
         ),
       ),
     );
   }
 
-  Uint8List prepareWifiInfoPacket() {
+  Uint8List prepareWifiInfoPacket({
+    required String ssid,
+    required String bssid,
+    required bool is5Ghz,
+    required String password,
+  }) {
     // 고정된 파라미터 상수
-    const String ssid = "와이파이 SSID";
-    const String password = "와이파이 비밀번호";
-    const String bssid = "bssid 값";
-    const bool is5Ghz = true;
-    const bool isSecured = true;
+    // const String ssid = "topping_iptime_5G";
+    // const String password = "thrhrl!!";
+    // const String bssid = "88:36:6c:b7:f9:ae";
+    // const bool is5Ghz = true;
+    // const bool isSecured = true;
 
     // 패킷 전체 길이 : 108바이트
     // packet[0]   = 헤더
@@ -252,7 +374,7 @@ class _ConfigWifiScreenState extends State<ConfigWifiScreen> {
     packet[2] = 0x00; // 예약된 바이트
     packet[3] = 0x68; // 데이터 길이 (104바이트)
     packet[4] = is5Ghz ? 0x01 : 0x00;
-    packet[5] = isSecured ? 0x01 : 0x00;
+    packet[5] = password.isNotEmpty ? 0x01 : 0x00;
 
     // SSID (최대 32바이트, 길이 모자랄 경우 \x00 패딩)
     List<int> ssidBytes = utf8.encode(ssid);
@@ -273,6 +395,12 @@ class _ConfigWifiScreenState extends State<ConfigWifiScreen> {
     }
     passwordBytes = padRightWithNull(passwordBytes, 32);
     packet.setRange(44, 44 + 32, passwordBytes);
+
+    // 패킷 데이터 출력
+    print('================ PACKET DATA ================');
+    print('Packet Length: ${packet.length}');
+    print('Packet Bytes: ${toHexString(packet)}');
+    print('=============================================');
 
     return packet;
   }
@@ -295,5 +423,11 @@ class _ConfigWifiScreenState extends State<ConfigWifiScreen> {
 
   String toHexString(Uint8List bytes) {
     return bytes.map((byte) => byte.toRadixString(16).padLeft(2, '0')).join();
+  }
+
+  bool hasPassword(String capabilities) {
+    // 보안 유형이 OPEN이거나 빈 값이면 비밀번호 없음
+    return !(capabilities.toUpperCase().contains("OPEN") ||
+        capabilities.isEmpty);
   }
 }
