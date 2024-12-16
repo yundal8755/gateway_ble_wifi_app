@@ -198,21 +198,25 @@ class _ConfigWifiScreenState extends State<ConfigWifiScreen> {
   void _sendWifiInfo() async {
     if (_selectedWifi == null || _passwordController.text.isEmpty) return;
 
+    final bool is5Ghz = _selectedWifi!.frequency >= 5000;
+    final bool isSecured = _passwordController.text.isNotEmpty;
+
     // Dialog 표시
     _showLoadingDialog();
 
     Uint8List packet = prepareWifiInfoPacket(
       ssid: _selectedWifi!.ssid,
       bssid: _selectedWifi!.bssid,
-      is5Ghz: _selectedWifi!.frequency >= 5000,
+      is5Ghz: is5Ghz,
       password: _passwordController.text,
     );
 
     // WiFi 정보 콘솔에 출력
     print('SSID: ${_selectedWifi!.ssid}');
     print('BSSID: ${_selectedWifi!.bssid}');
-    print('is5Ghz: ${_selectedWifi!.frequency >= 5000}');
+    print('is5Ghz: $is5Ghz');
     print('Password: ${_passwordController.text}');
+    print('isSecured : $isSecured');
 
     try {
       List<BluetoothService> services =
@@ -348,58 +352,35 @@ class _ConfigWifiScreenState extends State<ConfigWifiScreen> {
     required bool is5Ghz,
     required String password,
   }) {
-    // 고정된 파라미터 상수
-    // const String ssid = "topping_iptime_5G";
-    // const String password = "thrhrl!!";
-    // const String bssid = "88:36:6c:b7:f9:ae";
-    // const bool is5Ghz = true;
-    // const bool isSecured = true;
+    Uint8List packet = Uint8List(108); // 패킷 길이는 108 바이트로 고정
 
-    // 패킷 전체 길이 : 108바이트
-    // packet[0]   = 헤더
-    // packet[1]   = 서브명령어(0x03)
-    // packet[2]   = 예약된 바이트(0x00)
-    // packet[3]   = 데이터 길이(0x68 = 104바이트)
-    // 이후 순서 :
-    // packet[4]   = 5GHz 여부 (0x01 = true, 0x00 = false)
-    // packet[5]   = 보안 여부 (0x01 = true, 0x00 = false)
-    // packet[6..37]  = SSID (32바이트, 부족 시 '\x00' 패딩)
-    // packet[38..43] = BSSID (6바이트)
-    // packet[44..75] = PASSWORD (32바이트, 보안 활성화 시 필요, 부족 시 '\x00' 패딩)
-
-    Uint8List packet = Uint8List(108);
-
+    // Header
     packet[0] = 0x00; // 헤더
-    packet[1] = 0x03; // 서브명령어
-    packet[2] = 0x00; // 예약된 바이트
+    packet[1] = 0x03; // 명령어
+    packet[2] = 0x00; // 예약
     packet[3] = 0x68; // 데이터 길이 (104바이트)
-    packet[4] = is5Ghz ? 0x01 : 0x00;
-    packet[5] = password.isNotEmpty ? 0x01 : 0x00;
 
-    // SSID (최대 32바이트, 길이 모자랄 경우 \x00 패딩)
+    // Flags
+    packet[4] = is5Ghz ? 0x01 : 0x00; 
+    packet[5] = password.isNotEmpty ? 0x01 : 0x00; 
+
+    // SSID
     List<int> ssidBytes = utf8.encode(ssid);
-    if (ssidBytes.length > 32) {
-      ssidBytes = ssidBytes.sublist(0, 32);
-    }
-    ssidBytes = padRightWithNull(ssidBytes, 32);
-    packet.setRange(6, 6 + 32, ssidBytes);
+    ssidBytes = padRightWithNull(ssidBytes, 32); 
+    packet.setRange(6, 38, ssidBytes);
 
-    // BSSID (6바이트, "88:36:6c:b7:f9:ae" -> [0x88,0x36,0x6c,0xb7,0xf9,0xae])
-    List<int> bssidBytes = hexStringToUint8Array(bssid);
-    packet.setRange(38, 38 + 6, bssidBytes);
+    // BSSID
+    List<int> bssidBytes = hexStringToUint8Array(bssid); 
+    packet.setRange(38, 44, bssidBytes);
 
-    // Password (보안 시 32바이트, 부족 시 \x00 패딩)
+    // Password
     List<int> passwordBytes = utf8.encode(password);
-    if (passwordBytes.length > 32) {
-      passwordBytes = passwordBytes.sublist(0, 32);
-    }
-    passwordBytes = padRightWithNull(passwordBytes, 32);
-    packet.setRange(44, 44 + 32, passwordBytes);
+    passwordBytes = padRightWithNull(passwordBytes, 32); 
+    packet.setRange(44, 76, passwordBytes);
 
-    // 패킷 데이터 출력
     print('================ PACKET DATA ================');
     print('Packet Length: ${packet.length}');
-    print('Packet Bytes: ${toHexString(packet)}');
+    print('Packet Bytes: ${toHexString(packet)}'); // HEX 형태로 출력
     print('=============================================');
 
     return packet;
